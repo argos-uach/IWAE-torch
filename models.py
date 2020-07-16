@@ -83,11 +83,13 @@ def ELBO_VAE(x, dec_output, enc_output):
     ELBO = torch.sum(logqzxpz - logpxz) # Only for k=1
     return ELBO, logpxz.sum()/mc_samples, logqzxpz.sum()/logqzxpz.shape[1]
 
-"""
-def ELBO_IWAE(x, dec_mu, dec_logvar, enc_mu, enc_logvar, z):   
-    logpxz = -0.5*(dec_logvar + (x - dec_mu).pow(2)/dec_logvar.exp()).sum(dim=-1)
-    mc_samples = dec_mu.shape[1]        
+
+def ELBO_IWAE(x, dec_output, enc_output, z):   
+    dec_mu, dec_logvar = dec_output
+    enc_mu, enc_logvar = enc_output
+    mc_samples = dec_mu.shape[1] # number of monte-carlo samples
+    C = torch.log(torch.tensor(2*np.pi)) # Gaussian constant factor
+    logpxz = -0.5*(C + dec_logvar + (x.unsqueeze(1) - dec_mu).pow(2)/dec_logvar.exp()).sum(dim=-1)
     logqzxpz = 0.5 * (z.pow(2) - z.sub(enc_mu.unsqueeze(1)).pow(2)/enc_logvar.unsqueeze(1).exp() - enc_logvar.unsqueeze(1)).sum(dim=-1)
-    ELBO = torch.sum(logsumexp(logqzxpz - logpxz, dim=1) + np.log(mc_samples))
+    ELBO = torch.sum(logsumexp(logqzxpz - logpxz, dim=1) + torch.log(torch.tensor(mc_samples)))
     return ELBO, logpxz.sum()/mc_samples, logqzxpz.sum()/logqzxpz.shape[1]
-"""
