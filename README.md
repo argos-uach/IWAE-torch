@@ -2,7 +2,7 @@
 
 Implementations of Variational Autoencoder (VAE) and Importance Weigthed Autoencoders (IWAE) in PyTorch
 
-# Currently
+### Currently
 - Factorized Gaussian encoder
 - Factorized Gaussian decoder (with range limited variance)
 - VAE and IWAE cost functions
