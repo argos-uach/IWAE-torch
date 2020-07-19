@@ -1,43 +1,36 @@
 import torch
+import torch.nn as nn
 import numpy as np
-#from torch.nn import functional as F
 
-"""
-def logsumexp(inputs, dim=None, keepdim=True):    
-    # From: https://github.com/YosefLab/scVI/issues/13
-    return (inputs - F.log_softmax(inputs, dim=dim)).sum(dim, keepdim=keepdim)
-"""
 
-class GaussianEncoder(torch.nn.Module):
-    def __init__(self, latent_dim, input_dim, hidden_dim):
+class GaussianParameterizedNetwork(nn.Module):
+    def __init__(self, n_features, covariance_type='diag', variance_range_limiter=None):
         super(type(self), self).__init__()
-        self.hidden1 = torch.nn.Linear(input_dim, hidden_dim)
-        self.hidden2 = torch.nn.Linear(hidden_dim, hidden_dim)
-        self.z_mu = torch.nn.Linear(hidden_dim, latent_dim)
-        self.z_logvar = torch.nn.Linear(hidden_dim, latent_dim)
-        self.activation = torch.nn.ReLU()
+        #self.covariance_type = covariance_type
+        self.variance_range_limiter = variance_range_limiter
+        if covariance_type not in ['spherical', 'diag']:
+            raise ValueError("covariance_type should be in ['spherical', 'diag']")
+        if len(n_features) < 2:
+            raise ValueError("Please specify at least two layers")
+        self.hidden_layers = nn.ModuleList([nn.Linear(n_features[k], n_features[k+1])
+                                            for k in range(len(n_features)-2)])
+        self.param_mu = nn.Linear(n_features[-2], n_features[-1])
+        if covariance_type == 'diag':
+            self.param_logvar = nn.Linear(n_features[-2], n_features[-1])
+        elif covariance_type == 'spherical':
+            self.param_logvar = nn.Linear(n_features[-2], 1)
+        self.activation = nn.ReLU()
 
     def forward(self, x):
-        h = self.activation(self.hidden1(x))
-        h = self.activation(self.hidden2(h))
-        return self.z_mu(h), self.z_logvar(h)
+        for layer in self.hidden_layers:
+            x = self.activation(layer(x))
+        log_var = self.param_logvar(x)
+        if self.variance_range_limiter is not None:
+            log_var = nn.Tanh()(log_var)*self.variance_range_limiter
+        return self.param_mu(x), log_var
     
-class GaussianDecoder(torch.nn.Module):
-    def __init__(self, latent_dim, output_dim, hidden_dim):
-        super(type(self), self).__init__()
-        self.hidden1 = torch.nn.Linear(latent_dim, hidden_dim)
-        self.hidden2 = torch.nn.Linear(hidden_dim, hidden_dim)
-        self.x_mu = torch.nn.Linear(hidden_dim, output_dim)
-        self.x_logvar = torch.nn.Linear(hidden_dim, output_dim)
-        self.activation = torch.nn.ReLU()
-        self.range_limiter = torch.nn.Tanh()
-
-    def forward(self, z):
-        h = self.activation(self.hidden1(z))
-        h = self.activation(self.hidden2(h))
-        return self.x_mu(h), self.range_limiter(self.x_logvar(h))*2
-"""    
-class BernoulliDecoder(torch.nn.Module):
+""" 
+class BernoulliParameterizedNetwork(torch.nn.Module):
     def __init__(self, latent_dim, output_dim, hidden_dim=128):
         super(type(self), self).__init__()
         self.hidden1 = torch.nn.Linear(latent_dim, hidden_dim)
@@ -50,12 +43,26 @@ class BernoulliDecoder(torch.nn.Module):
         h = self.activation(self.hidden2(h))
         return self.x_plogits(h)
 """    
-class VariationalAutoencoder(torch.nn.Module):
-    def __init__(self, latent_dim, data_dim, hidden_dim=128, decoder_dist='Gaussian'):
-        super(type(self), self).__init__() 
-        self.encoder = GaussianEncoder(latent_dim, input_dim=data_dim, hidden_dim=hidden_dim)
-        if decoder_dist == 'Gaussian':
-            self.decoder = GaussianDecoder(latent_dim, output_dim=data_dim, hidden_dim=hidden_dim)
+
+def gaussian_log_likelihood(x, mu, logvar):
+    C = torch.log(torch.tensor([2*np.pi]))
+    return -0.5*(C + logvar + (x.unsqueeze(1) - mu).pow(2)/logvar.exp()).sum(dim=-1)
+
+
+"""
+Do this: https://stackoverflow.com/questions/60974047/importance-weighted-autoencoder-doing-worse-than-vae
+
+interleave instead of new dimension, that way convolutions can be used
+
+"""
+class _StochasticAutoencoder(nn.Module):
+    def __init__(self, latent_dim, data_dim, hidden_dim=128):
+        #super(type(self), self).__init__() 
+        nn.Module.__init__(self)
+        self.encoder = GaussianParameterizedNetwork(n_features=[data_dim] + [hidden_dim]*2  +[latent_dim],
+                                                    covariance_type='diag')
+        self.decoder = GaussianParameterizedNetwork(n_features=[latent_dim] + [hidden_dim]*2 + [data_dim],
+                                                    covariance_type='diag', variance_range_limiter=10)
 
     def sample(self, mu, std, mc_samples=1):
         batch_size, n_latent = mu.shape
@@ -67,29 +74,28 @@ class VariationalAutoencoder(torch.nn.Module):
         z_mu, z_logvar = self.encoder(x)
         z = self.sample(z_mu, (0.5*z_logvar).exp(), mc_samples)
         return self.decoder(z), (z_mu, z_logvar), z
-
-
-def ELBO_VAE(x, dec_output, enc_output):
-    dec_mu, dec_logvar = dec_output
-    enc_mu, enc_logvar = enc_output
-    mc_samples = dec_mu.shape[1] # number of monte-carlo samples
-    C = torch.log(torch.tensor(2*np.pi)) # Gaussian constant factor
-    # Log likelihood of the decoder
-    logpxz = -0.5*(C + dec_logvar + (x.unsqueeze(1) - dec_mu).pow(2)/dec_logvar.exp()).sum(dim=-1)
-    # KL divergence between encoder distribution and standard normal prior
-    logqzxpz = -0.5 * (1.0 + enc_logvar - enc_mu.pow(2) - enc_logvar.exp()).sum(dim=-1).unsqueeze_(1)
     
-    #ELBO = torch.sum(logsumexp(logqzxpz - logpxz, dim=1) + np.log(mc_samples))
-    ELBO = torch.sum(logqzxpz - logpxz) # Only for k=1
-    return ELBO, logpxz.sum()/mc_samples, logqzxpz.sum()/logqzxpz.shape[1]
+    def negELBO(self, x, mc_samples=1):
+        dec_output, enc_output, z = self.forward(x, mc_samples)
+        dec_mu, dec_logvar = dec_output
+        enc_mu, enc_logvar = enc_output
+        logpxz = gaussian_log_likelihood(x, dec_mu, dec_logvar)
+        logqzxpz = self.KL_cost(enc_mu, enc_logvar, z)
+        C = torch.log(torch.Tensor([mc_samples]))
+        loss = torch.sum(torch.logsumexp(logqzxpz - logpxz, dim=1)) + C
+        #loss = torch.sum(logqzxpz - logpxz)
+        return loss, logpxz.sum(), logqzxpz.sum()
+        
 
+class VariationalAutoencoder(_StochasticAutoencoder):    
+    
+    def KL_cost(self, mu, logvar, z):
+        return -0.5*(1. + logvar - mu.pow(2) - logvar.exp()).sum(dim=-1).unsqueeze_(1)
+    
+                         
+class ImportanceWeightedAutoencoder(_StochasticAutoencoder):
 
-def ELBO_IWAE(x, dec_output, enc_output, z):   
-    dec_mu, dec_logvar = dec_output
-    enc_mu, enc_logvar = enc_output
-    mc_samples = dec_mu.shape[1] # number of monte-carlo samples
-    C = torch.log(torch.tensor(2*np.pi)) # Gaussian constant factor
-    logpxz = -0.5*(C + dec_logvar + (x.unsqueeze(1) - dec_mu).pow(2)/dec_logvar.exp()).sum(dim=-1)
-    logqzxpz = 0.5 * (z.pow(2) - z.sub(enc_mu.unsqueeze(1)).pow(2)/enc_logvar.unsqueeze(1).exp() - enc_logvar.unsqueeze(1)).sum(dim=-1)
-    ELBO = torch.sum(logsumexp(logqzxpz - logpxz, dim=1) + torch.log(torch.tensor(mc_samples)))
-    return ELBO, logpxz.sum()/mc_samples, logqzxpz.sum()/logqzxpz.shape[1]
+    def KL_cost(self, mu, logvar, z):
+        return 0.5*(z.pow(2) - (z - mu.unsqueeze(1)).pow(2)/logvar.exp().unsqueeze(1) - logvar.unsqueeze(1)).sum(dim=-1)
+    
+    
