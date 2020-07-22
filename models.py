@@ -61,8 +61,10 @@ class _StochasticAutoencoder(nn.Module):
         nn.Module.__init__(self)
         self.encoder = GaussianParameterizedNetwork(n_features=[data_dim] + [hidden_dim]*2  +[latent_dim],
                                                     covariance_type='diag')
+        # TODO: variance_range_limiter, greater than 4 does not work, why?
+        # Check upper/lower range reached
         self.decoder = GaussianParameterizedNetwork(n_features=[latent_dim] + [hidden_dim]*2 + [data_dim],
-                                                    covariance_type='diag', variance_range_limiter=10)
+                                                    covariance_type='diag', variance_range_limiter=4)
 
     def sample(self, mu, std, mc_samples=1):
         batch_size, n_latent = mu.shape
@@ -87,6 +89,7 @@ class _StochasticAutoencoder(nn.Module):
         return loss, logpxz.sum(), logqzxpz.sum()
         
 
+# TODO: move criterion out
 class VariationalAutoencoder(_StochasticAutoencoder):    
     
     def KL_cost(self, mu, logvar, z):
